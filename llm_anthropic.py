@@ -137,6 +137,16 @@ class ClaudeOptions(llm.Options):
         default=None,
     )
 
+    cache_prompt: Optional[bool] = Field(
+        description="Whether to cache the user prompt for future use",
+        default=True,
+    )
+
+    cache_system: Optional[bool] = Field(
+        description="Whether to cache the system prompt for future use",
+        default=True,
+    )
+
     @field_validator("stop_sequences")
     def validate_stop_sequences(cls, stop_sequences):
         error_msg = "stop_sequences must be a list of strings or a single string"
@@ -242,8 +252,11 @@ class _Shared:
 
     def build_messages(self, prompt, conversation) -> List[dict]:
         messages = []
+        cache_control_count = 0
+        max_cache_control_blocks = 2  # Leave one for the current prompt and system prompt
+
         if conversation:
-            for response in conversation.responses:
+            for response in reversed(conversation.responses):
                 if response.attachments:
                     content = [
                         {
@@ -261,17 +274,31 @@ class _Shared:
                         for attachment in response.attachments
                     ]
                     content.append({"type": "text", "text": response.prompt.prompt})
+                    
+                    user_message = {
+                        "role": "user",
+                        "content": content,
+                    }
+                    
+                    if prompt.options.cache_prompt is not False and cache_control_count < max_cache_control_blocks:
+                        user_message["content"][-1]["cache_control"] = {"type": "ephemeral"}
+                        cache_control_count += 1
+                    
+                    messages.insert(0, user_message)
                 else:
-                    content = response.prompt.prompt
-                messages.extend(
-                    [
-                        {
-                            "role": "user",
-                            "content": content,
-                        },
-                        {"role": "assistant", "content": response.text_or_raise()},
-                    ]
-                )
+                    user_message = {
+                        "role": "user",
+                        "content": [{"type": "text", "text": response.prompt.prompt}],
+                    }
+                    
+                    if prompt.options.cache_prompt is not False and cache_control_count < max_cache_control_blocks:
+                        user_message["content"][0]["cache_control"] = {"type": "ephemeral"}
+                        cache_control_count += 1
+                    
+                    messages.insert(0, user_message)
+                
+                messages.insert(1, {"role": "assistant", "content": response.text_or_raise()})
+
         if prompt.attachments:
             content = [
                 {
@@ -289,7 +316,10 @@ class _Shared:
                 for attachment in prompt.attachments
             ]
             if prompt.prompt:
-                content.append({"type": "text", "text": prompt.prompt})
+                text_content = {"type": "text", "text": prompt.prompt}
+                if prompt.options.cache_prompt:
+                    text_content["cache_control"] = {"type": "ephemeral"}
+                content.append(text_content)
             messages.append(
                 {
                     "role": "user",
@@ -297,7 +327,11 @@ class _Shared:
                 }
             )
         else:
-            messages.append({"role": "user", "content": prompt.prompt})
+            content = [{"type": "text", "text": prompt.prompt}]
+            if prompt.options.cache_prompt:
+                content[0]["cache_control"] = {"type": "ephemeral"}
+            messages.append({"role": "user", "content": content})
+            
         if prompt.options.prefill:
             messages.append({"role": "assistant", "content": prompt.options.prefill})
         return messages
@@ -323,7 +357,16 @@ class _Shared:
             kwargs["top_k"] = prompt.options.top_k
 
         if prompt.system:
-            kwargs["system"] = prompt.system
+            if prompt.options.cache_system:
+                kwargs["system"] = [
+                    {
+                        "type": "text",
+                        "text": prompt.system,
+                        "cache_control": {"type": "ephemeral"}
+                    }
+                ]
+            else:
+                kwargs["system"] = prompt.system
 
         if prompt.options.stop_sequences:
             kwargs["stop_sequences"] = prompt.options.stop_sequences
@@ -362,7 +405,7 @@ class _Shared:
         return kwargs
 
     def set_usage(self, response):
-        usage = response.response_json.pop("usage")
+        usage = response.response_json.get("usage")
         if usage:
             response.set_usage(
                 input=usage.get("input_tokens"), output=usage.get("output_tokens")
@@ -374,7 +417,10 @@ class _Shared:
 
 class ClaudeMessages(_Shared, llm.KeyModel):
     def execute(self, prompt, stream, response, conversation, key):
-        client = Anthropic(api_key=self.get_key(key))
+        client = Anthropic(
+            api_key=self.get_key(key),
+            default_headers={"anthropic-beta": "prompt-caching-2024-07-31"}
+        )
         kwargs = self.build_kwargs(prompt, conversation)
         prefill_text = self.prefill_text(prompt)
         if "betas" in kwargs:
@@ -406,7 +452,10 @@ class ClaudeMessages(_Shared, llm.KeyModel):
 
 class AsyncClaudeMessages(_Shared, llm.AsyncKeyModel):
     async def execute(self, prompt, stream, response, conversation, key):
-        client = AsyncAnthropic(api_key=self.get_key(key))
+        client = AsyncAnthropic(
+            api_key=self.get_key(key),
+            default_headers={"anthropic-beta": "prompt-caching-2024-07-31"}
+        )
         kwargs = self.build_kwargs(prompt, conversation)
         if "betas" in kwargs:
             messages_client = client.beta.messages
