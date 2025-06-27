@@ -137,7 +137,7 @@ class ClaudeOptions(llm.Options):
         default=None,
     )
 
-    cache_prompt: Optional[bool] = Field(
+    cache_user: Optional[bool] = Field(
         description="Whether to cache the user prompt for future use",
         default=True,
     )
@@ -280,7 +280,7 @@ class _Shared:
                         "content": content,
                     }
                     
-                    if prompt.options.cache_prompt is not False and cache_control_count < max_cache_control_blocks:
+                    if prompt.options.cache_user is not False and cache_control_count < max_cache_control_blocks:
                         user_message["content"][-1]["cache_control"] = {"type": "ephemeral"}
                         cache_control_count += 1
                     
@@ -291,7 +291,7 @@ class _Shared:
                         "content": [{"type": "text", "text": response.prompt.prompt}],
                     }
                     
-                    if prompt.options.cache_prompt is not False and cache_control_count < max_cache_control_blocks:
+                    if prompt.options.cache_user is not False and cache_control_count < max_cache_control_blocks:
                         user_message["content"][0]["cache_control"] = {"type": "ephemeral"}
                         cache_control_count += 1
                     
@@ -317,7 +317,7 @@ class _Shared:
             ]
             if prompt.prompt:
                 text_content = {"type": "text", "text": prompt.prompt}
-                if prompt.options.cache_prompt:
+                if prompt.options.cache_user:
                     text_content["cache_control"] = {"type": "ephemeral"}
                 content.append(text_content)
             messages.append(
@@ -328,7 +328,7 @@ class _Shared:
             )
         else:
             content = [{"type": "text", "text": prompt.prompt}]
-            if prompt.options.cache_prompt:
+            if prompt.options.cache_user:
                 content[0]["cache_control"] = {"type": "ephemeral"}
             messages.append({"role": "user", "content": content})
             
