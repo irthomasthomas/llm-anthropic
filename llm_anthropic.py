@@ -1,11 +1,90 @@
 from anthropic import Anthropic, AsyncAnthropic
 import llm
+import click
 import json
 from pydantic import Field, field_validator, model_validator
 from typing import Optional, List, Union
 
 DEFAULT_THINKING_TOKENS = 1024
 DEFAULT_TEMPERATURE = 1.0
+
+# Global cache settings - these can be toggled via CLI
+_cache_settings = {
+    "system_cache": True,
+    "prompt_cache": True,
+}
+
+
+def get_cache_settings():
+    """Get current cache settings."""
+    return _cache_settings.copy()
+
+
+def set_cache_setting(key, value):
+    """Set a cache setting."""
+    _cache_settings[key] = value
+
+
+@llm.hookimpl
+def register_commands(cli):
+    @cli.group(name="anthropic")
+    def anthropic_group():
+        """Commands for Anthropic models."""
+        pass
+
+    @anthropic_group.group(name="cache")
+    def cache_group():
+        """Manage Anthropic prompt caching settings."""
+        pass
+
+    @cache_group.command(name="status")
+    def cache_status():
+        """Show current cache settings."""
+        settings = get_cache_settings()
+        click.echo("Anthropic Cache Settings:")
+        click.echo(f"  System cache: {'enabled' if settings['system_cache'] else 'disabled'}")
+        click.echo(f"  Prompt cache: {'enabled' if settings['prompt_cache'] else 'disabled'}")
+
+    @cache_group.command(name="toggle-system")
+    def toggle_system_cache():
+        """Toggle system prompt caching on/off."""
+        current = _cache_settings["system_cache"]
+        _cache_settings["system_cache"] = not current
+        new_state = "enabled" if _cache_settings["system_cache"] else "disabled"
+        click.echo(f"System cache is now {new_state}")
+
+    @cache_group.command(name="toggle-prompt")
+    def toggle_prompt_cache():
+        """Toggle user prompt caching on/off."""
+        current = _cache_settings["prompt_cache"]
+        _cache_settings["prompt_cache"] = not current
+        new_state = "enabled" if _cache_settings["prompt_cache"] else "disabled"
+        click.echo(f"Prompt cache is now {new_state}")
+
+    @cache_group.command(name="toggle-all")
+    def toggle_all_cache():
+        """Toggle all caching on/off."""
+        # If any cache is enabled, disable all; otherwise enable all
+        any_enabled = any(_cache_settings.values())
+        new_value = not any_enabled
+        _cache_settings["system_cache"] = new_value
+        _cache_settings["prompt_cache"] = new_value
+        new_state = "enabled" if new_value else "disabled"
+        click.echo(f"All caching is now {new_state}")
+
+    @cache_group.command(name="enable-all")
+    def enable_all_cache():
+        """Enable all caching."""
+        _cache_settings["system_cache"] = True
+        _cache_settings["prompt_cache"] = True
+        click.echo("All caching is now enabled")
+
+    @cache_group.command(name="disable-all")
+    def disable_all_cache():
+        """Disable all caching."""
+        _cache_settings["system_cache"] = False
+        _cache_settings["prompt_cache"] = False
+        click.echo("All caching is now disabled")
 
 
 @llm.hookimpl
@@ -91,6 +170,37 @@ def register_models(register):
         ),
         aliases=("claude-3.7-sonnet", "claude-3.7-sonnet-latest"),
     )
+    # Claude 4.5 models
+    register(
+        ClaudeMessages(
+            "claude-sonnet-4-5-20250929",
+            supports_pdf=True,
+            supports_thinking=True,
+            default_max_tokens=8192,
+        ),
+        AsyncClaudeMessages(
+            "claude-sonnet-4-5-20250929",
+            supports_pdf=True,
+            supports_thinking=True,
+            default_max_tokens=8192,
+        ),
+        aliases=("claude-sonnet-4.5",),
+    )
+    register(
+        ClaudeMessages(
+            "claude-haiku-4-5-20251001",
+            supports_pdf=True,
+            supports_thinking=True,
+            default_max_tokens=8192,
+        ),
+        AsyncClaudeMessages(
+            "claude-haiku-4-5-20251001",
+            supports_pdf=True,
+            supports_thinking=True,
+            default_max_tokens=8192,
+        ),
+        aliases=("claude-haiku-4.5",),
+    )
     register(
         ClaudeMessages(
             "claude-opus-4-5-20251101",
@@ -105,6 +215,37 @@ def register_models(register):
             default_max_tokens=8192,
         ),
         aliases=("claude-opus-4.5",),
+    )
+    # Claude 4 and 4.1 models
+    register(
+        ClaudeMessages(
+            "claude-opus-4-20250514",
+            supports_pdf=True,
+            supports_thinking=True,
+            default_max_tokens=8192,
+        ),
+        AsyncClaudeMessages(
+            "claude-opus-4-20250514",
+            supports_pdf=True,
+            supports_thinking=True,
+            default_max_tokens=8192,
+        ),
+        aliases=("claude-opus-4",),
+    )
+    register(
+        ClaudeMessages(
+            "claude-opus-4-1-20250805",
+            supports_pdf=True,
+            supports_thinking=True,
+            default_max_tokens=8192,
+        ),
+        AsyncClaudeMessages(
+            "claude-opus-4-1-20250805",
+            supports_pdf=True,
+            supports_thinking=True,
+            default_max_tokens=8192,
+        ),
+        aliases=("claude-opus-4.1",),
     )
 
 
@@ -153,13 +294,13 @@ class ClaudeOptions(llm.Options):
     )
 
     cache_prompt: Optional[bool] = Field(
-        description="Whether to cache the user prompt for future use",
-        default=True,
+        description="Whether to cache the user prompt for future use (defaults to global setting)",
+        default=None,
     )
 
     cache_system: Optional[bool] = Field(
-        description="Whether to cache the system prompt for future use",
-        default=True,
+        description="Whether to cache the system prompt for future use (defaults to global setting)",
+        default=None,
     )
 
     @field_validator("stop_sequences")
@@ -265,10 +406,23 @@ class _Shared:
             return prompt.options.prefill
         return ""
 
+    def _should_cache_prompt(self, prompt):
+        """Determine if prompt caching should be used."""
+        if prompt.options.cache_prompt is not None:
+            return prompt.options.cache_prompt
+        return _cache_settings["prompt_cache"]
+
+    def _should_cache_system(self, prompt):
+        """Determine if system prompt caching should be used."""
+        if prompt.options.cache_system is not None:
+            return prompt.options.cache_system
+        return _cache_settings["system_cache"]
+
     def build_messages(self, prompt, conversation) -> List[dict]:
         messages = []
         cache_control_count = 0
         max_cache_control_blocks = 2  # Leave one for the current prompt and system prompt
+        cache_prompt = self._should_cache_prompt(prompt)
 
         if conversation:
             for response in reversed(conversation.responses):
@@ -295,7 +449,7 @@ class _Shared:
                         "content": content,
                     }
                     
-                    if prompt.options.cache_prompt is not False and cache_control_count < max_cache_control_blocks:
+                    if cache_prompt and cache_control_count < max_cache_control_blocks:
                         user_message["content"][-1]["cache_control"] = {"type": "ephemeral"}
                         cache_control_count += 1
                     
@@ -306,7 +460,7 @@ class _Shared:
                         "content": [{"type": "text", "text": response.prompt.prompt}],
                     }
                     
-                    if prompt.options.cache_prompt is not False and cache_control_count < max_cache_control_blocks:
+                    if cache_prompt and cache_control_count < max_cache_control_blocks:
                         user_message["content"][0]["cache_control"] = {"type": "ephemeral"}
                         cache_control_count += 1
                     
@@ -332,7 +486,7 @@ class _Shared:
             ]
             if prompt.prompt:
                 text_content = {"type": "text", "text": prompt.prompt}
-                if prompt.options.cache_prompt:
+                if cache_prompt:
                     text_content["cache_control"] = {"type": "ephemeral"}
                 content.append(text_content)
             messages.append(
@@ -343,7 +497,7 @@ class _Shared:
             )
         elif prompt.prompt:
             content = [{"type": "text", "text": prompt.prompt}]
-            if prompt.options.cache_prompt:
+            if cache_prompt:
                 content[0]["cache_control"] = {"type": "ephemeral"}
             messages.append({"role": "user", "content": content})
             
@@ -372,7 +526,7 @@ class _Shared:
             kwargs["top_k"] = prompt.options.top_k
 
         if prompt.system:
-            if prompt.options.cache_system:
+            if self._should_cache_system(prompt):
                 kwargs["system"] = [
                     {
                         "type": "text",
